@@ -1,16 +1,14 @@
 """
-Zero-torque ADCS / frame diagnostic in Basilisk.
+Velocity-pointing ADCS simulation in Basilisk.
 
 Purpose
 -------
-Keep the full wiring in place:
-- aero torque path
-- TAM + MTB path
-- velocity-pointing + tracking + MRP control path
-- mode switching path
-
-But force actual applied control/disturbance torques to zero so the run becomes a
-clean frame / message / reference diagnostic.
+Full attitude determination and control system (ADCS) simulation with:
+- Aerodynamic torque disturbances from lookup table
+- Three-axis magnetometer (TAM) and magnetorquer (MTB) hardware
+- Velocity-pointing reference frame generation
+- MRP feedback control with attitude tracking
+- Mode switching between B-dot detumbling and velocity-pointing control
 
 Reference Frame Convention
 --------------------------
@@ -18,6 +16,9 @@ Velocity-pointing reference frame R:
 - +X_R: velocity direction (ram)
 - +Z_R: orbit normal (h = r × v)
 - +Y_R: completes right-handed frame (≈ radially inward for circular orbit)
+
+The spacecraft starts tumbling and uses B-dot control to detumble, then switches
+to velocity-pointing attitude control using magnetorquers for actuation.
 """
 
 import numpy as np
@@ -152,7 +153,13 @@ class SimpleMagneticField(sysModel.SysModel):
 
 
 class SimpleBdot(sysModel.SysModel):
-    """Simple B-dot controller. Kept in the loop but gain can be set to zero."""
+    """
+    Simple B-dot controller for detumbling.
+
+    Implements the B-dot control law: m = -k * dB/dt
+    where m is the magnetic dipole moment and dB/dt is the rate of change of the magnetic field.
+    This creates a damping torque to reduce spacecraft angular velocity.
+    """
 
     def __init__(self):
         super().__init__()
@@ -194,7 +201,15 @@ class SimpleBdot(sysModel.SysModel):
 
 
 class MagneticMomentumManagement(sysModel.SysModel):
-    """Magnetic torque allocation for commanded body torque."""
+    """
+    Magnetic torque allocation for commanded body torque.
+
+    Allocates a desired control torque to magnetorquer dipoles using the cross product:
+    τ = m × B  =>  m = (B × τ) / |B|²
+
+    Note: Can only control 2 axes instantaneously (perpendicular to B-field).
+    The activeAxes mask allows disabling specific magnetorquer axes.
+    """
 
     def __init__(self):
         super().__init__()
@@ -235,7 +250,13 @@ class MagneticMomentumManagement(sysModel.SysModel):
 
 
 class ModeSwitch(sysModel.SysModel):
-    """Optional BDOT/NADIR switch. Disabled here for a clean zero-torque baseline."""
+    """
+    Mode switching logic between BDOT (detumbling) and NADIR (pointing) control.
+
+    Switches from BDOT to NADIR mode when the spacecraft angular rate falls below
+    a threshold, indicating successful detumbling. This allows transition from
+    rate damping to attitude pointing control.
+    """
 
     def __init__(self):
         super().__init__()
@@ -290,7 +311,15 @@ class ModeSwitch(sysModel.SysModel):
 
 
 class TorqueLookup:
-    """Regular-grid torque table interpolator over alpha/beta in degrees."""
+    """
+    Regular-grid aerodynamic torque table interpolator.
+
+    Performs 2D linear interpolation of precomputed aerodynamic torques as a function of:
+    - alpha: angle of attack (rotation about body Y axis) [-180, 180] degrees
+    - beta: sideslip angle (rotation about body Z axis) [-180, 180] degrees
+
+    The torque table should have shape (3, n_alpha, n_beta) containing body-frame torques.
+    """
 
     def __init__(
         self,
@@ -397,9 +426,9 @@ class AeroTorqueFromTable(sysModel.SysModel):
         self.cmdTorqueOutMsg.write(payload, CurrentSimNanos, self.moduleID)
 
 
-def run_zero_torque_diagnostic():
+def run_adcs_sim():
     sim_dt = 0.1
-    stop_time = 5*5400.0
+    stop_time = 3*5400.0
 
     scSim = SimulationBaseClass.SimBaseClass()
     simProcessName = "simProcess"
@@ -412,15 +441,18 @@ def run_zero_torque_diagnostic():
     # ------------------------------------------------------------------
     scObject = spacecraft.Spacecraft()
     scObject.ModelTag = "sat"
-    scObject.hub.mHub = 0.75
-    scObject.hub.r_BcB_B = [[-0.0558], [0.0], [0.0]]
+    scObject.hub.mHub = 0.75  # Spacecraft mass [kg]
+    scObject.hub.r_BcB_B = [[-0.0558], [0.0], [0.0]]  # Center of mass offset from body origin [m]
+    # Moment of inertia tensor about center of mass [kg*m^2]
     scObject.hub.IHubPntBc_B = [
         [0.0015, 0.0, 0.0],
         [0.0, 0.0062, 0.0],
         [0.0, 0.0, 0.0062]
     ]
 
+    # Initial attitude: 
     scObject.hub.sigma_BNInit = [[0.0], [0.0], [0.0]]
+    # Initial angular velocity: tumbling at 0.5 rad/s on all axes
     scObject.hub.omega_BN_BInit = [[0.5], [0.5], [0.5]]
 
     # ------------------------------------------------------------------
@@ -431,14 +463,16 @@ def run_zero_torque_diagnostic():
     earth.isCentralBody = True
     mu = earth.mu
 
+    # Define orbital elements for Sun-synchronous LEO orbit
     oe = orbitalMotion.ClassicElements()
-    oe.a = 6771000.0
-    oe.e = 0.0001
-    oe.i = 97.0 * macros.D2R
-    oe.Omega = 0.0
-    oe.omega = 0.0
-    oe.f = 0.0
+    oe.a = 6771000.0  # Semi-major axis [m] (~400 km altitude)
+    oe.e = 0.0001  # Eccentricity (near-circular)
+    oe.i = 97.0 * macros.D2R  # Inclination [rad] (sun-synchronous)
+    oe.Omega = 0.0  # Right ascension of ascending node [rad]
+    oe.omega = 0.0  # Argument of periapsis [rad]
+    oe.f = 0.0  # True anomaly [rad]
 
+    # Convert orbital elements to initial position and velocity
     rN, vN = orbitalMotion.elem2rv(mu, oe)
     scObject.hub.r_CN_NInit = rN
     scObject.hub.v_CN_NInit = vN
@@ -447,22 +481,12 @@ def run_zero_torque_diagnostic():
     # ------------------------------------------------------------------
     # AERODYNAMIC TORQUE TABLE
     # ------------------------------------------------------------------
-    # Original MATLAB / ADBSat loading logic kept here for later use.
-    #
-    torque_table_file = "torque_table1.mat"   # 1 for +x, 2 for -x
+    # Load precomputed aerodynamic torque table from MATLAB/ADBSat  
+    # Table contains 3D torques as a function of angle-of-attack (alpha) and sideslip (beta)
+    torque_table_file = "torque_table1.mat"   # 1 for +x velocity, 2 for -x velocity
     torque_path = PROJECT_ROOT / "data" / torque_table_file
     torque_table = loadmat(torque_path, simplify_cells=True)["torque_table"]
     torque_table = np.asarray(torque_table, dtype=float)
-    
-    #if torque_table.ndim != 3 or torque_table.shape[0] != 3:
-    #     raise ValueError(
-    #         f"Expected torque_table shape (3, n_alpha, n_beta), got {torque_table.shape}"
-    #     )
-
-    # Zero-torque baseline for frame / wiring diagnostics
-    #n_alpha = 37
-    #n_beta = 37
-    #torque_table = np.zeros((3, n_alpha, n_beta))
 
     aeroTorque = AeroTorqueFromTable(torque_table)
     aeroTorque.ModelTag = "AeroTorque"
@@ -554,12 +578,13 @@ def run_zero_torque_diagnostic():
     trackingError.attNavInMsg.subscribeTo(simpleNavModule.attOutMsg)
     scSim.AddModelToTask(simTaskName, trackingError, 88)
 
+    # MRP feedback control for 3-axis attitude control
     mrpControl = mrpFeedback.mrpFeedback()
     mrpControl.ModelTag = "mrpFeedback"
-    mrpControl.K = 0.01  # Derivative gain (typical for LEO)
-    mrpControl.P = 0.005  # Proportional gain
-    mrpControl.Ki = 0.0001  # Integral gain (small but active)
-    mrpControl.integralLimit = 2.0 / 180.0 * np.pi  # 2 deg limit
+    mrpControl.K = 0.01  # Derivative gain [N*m*s] (damping)
+    mrpControl.P = 0.005  # Proportional gain [N*m] (stiffness)
+    mrpControl.Ki = 0.0001  # Integral gain [N*m/s] (bias rejection)
+    mrpControl.integralLimit = 2.0 / 180.0 * np.pi  # 2 deg integral windup limit [rad]
     mrpControl.guidInMsg.subscribeTo(trackingError.attGuidOutMsg)
 
     vcMsg = messaging.VehicleConfigMsg()
@@ -576,7 +601,8 @@ def run_zero_torque_diagnostic():
     magMomentumCtrl = MagneticMomentumManagement()
     magMomentumCtrl.ModelTag = "MagMomentum"
     magMomentumCtrl.maxDipole = 0.016
-    magMomentumCtrl.activeAxes = [False, True, True]  # Y+Z dipoles for roll control
+    # Disable X-axis dipole, enable Y+Z dipoles to avoid interfering with primary control axis
+    magMomentumCtrl.activeAxes = [False, True, True]  # [X, Y, Z]
     magMomentumCtrl.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
     magMomentumCtrl.cmdTorqueInMsg.subscribeTo(mrpControl.cmdTorqueOutMsg)
     scSim.AddModelToTask(simTaskName, magMomentumCtrl, 85)
@@ -624,12 +650,12 @@ def run_zero_torque_diagnostic():
 
     from Basilisk.utilities import vizSupport
 
-    viz = vizSupport.enableUnityVisualization(
-        scSim,
-        simTaskName,
-        scObject,
-        liveStream=True
-    )
+    # viz = vizSupport.enableUnityVisualization(
+    #     scSim,
+    #     simTaskName,
+    #     scObject,
+    #     liveStream=True
+    # )
 
     # ------------------------------------------------------------------
     # RUN
@@ -658,119 +684,81 @@ def run_zero_torque_diagnostic():
     torque_mtb_uNm = np.array(mtbLog.mtbNetTorque_B) * 1e6
     torque_aero_uNm = np.array(aeroLog.torqueRequestBody) * 1e6
 
+    # Calculate mean orbital rate for reference
     n_orbital = np.sqrt(mu / oe.a**3)
-
-    # C_BR maps reference-frame components into body-frame components.
-    # The rows of C_BR are the body axes expressed in the reference frame R.
-    # Reference frame R: +X = velocity, +Y ≈ radially inward, +Z = orbit normal
-    body_x_to_velocity_deg = np.zeros(len(sigma_BR))
-    body_x_to_ref_y_deg = np.zeros(len(sigma_BR))
-    body_z_to_orbit_normal_deg = np.zeros(len(sigma_BR))
-
-    for i, mrp_i in enumerate(sigma_BR):
-        C_BR = np.array(rbk.MRP2C(mrp_i))
-
-        body_x_in_R = C_BR[0, :]
-        body_y_in_R = C_BR[1, :]
-        body_z_in_R = C_BR[2, :]
-
-        # Body +X alignment with reference axes
-        # R frame: X=velocity, Y≈radial inward, Z=orbit normal
-        body_x_to_velocity_deg[i] = np.degrees(np.arccos(np.clip(body_x_in_R[0], -1.0, 1.0)))
-        body_x_to_ref_y_deg[i] = np.degrees(np.arccos(np.clip(body_x_in_R[1], -1.0, 1.0)))
-
-        # Body +Z to orbit normal
-        body_z_to_orbit_normal_deg[i] = np.degrees(np.arccos(np.clip(body_z_in_R[2], -1.0, 1.0)))
 
     # ------------------------------------------------------------------
     # PLOTS
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(10, 1, figsize=(12, 26), sharex=True)
+    fig, axes = plt.subplots(7, 1, figsize=(12, 26), sharex=True)
 
-    axes[0].plot(time_min, omega_BN_B[:, 0] * macros.R2D * 1e3, label='ωx')
-    axes[0].plot(time_min, omega_BN_B[:, 1] * macros.R2D * 1e3, label='ωy')
-    axes[0].plot(time_min, omega_BN_B[:, 2] * macros.R2D * 1e3, label='ωz')
-    axes[0].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
-    axes[0].set_ylabel('ω_BN [mdeg/s]')
-    axes[0].set_title('Inertial body rates')
+    # Plot 0: Body rate relative to velocity-pointing reference frame
+    axes[0].plot(time_min, omega_BR_mag * macros.R2D, color='tab:purple', label='|ω_BR|')
+    axes[0].axhline(n_orbital * macros.R2D, color='r', linestyle='--',
+                    label=f'orbital rate ≈ {n_orbital * macros.R2D:.4f} deg/s')
+    axes[0].set_ylabel('|ω_BR| [deg/s]')
+    axes[0].set_title('Rate relative to velocity-pointing reference frame')
     axes[0].legend()
     axes[0].grid(True)
 
-    axes[1].plot(time_min, np.maximum(omega_BN_mag * macros.R2D, 1e-12), color='tab:blue', label='|ω_BN|')
-    axes[1].axhline(1e-12, color='k', linestyle='--', linewidth=0.6)
-    axes[1].set_ylabel('|ω_BN| [deg/s]')
-    axes[1].set_yscale('log')
+    # Plot 1: Inertial attitude MRPs (body relative to inertial frame)
+    axes[1].plot(time_min, sigma_BN[:, 0], label='σ1')
+    axes[1].plot(time_min, sigma_BN[:, 1], label='σ2')
+    axes[1].plot(time_min, sigma_BN[:, 2], label='σ3')
+    axes[1].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[1].set_ylabel('σ_BN [-]')
+    axes[1].set_title('Inertial attitude MRPs')
     axes[1].legend()
     axes[1].grid(True)
 
-    axes[2].plot(time_min, omega_BR_mag * macros.R2D, color='tab:purple', label='|ω_BR|')
-    axes[2].axhline(n_orbital * macros.R2D, color='r', linestyle='--',
-                    label=f'orbital rate ≈ {n_orbital * macros.R2D:.4f} deg/s')
-    axes[2].set_ylabel('|ω_BR| [deg/s]')
-    axes[2].set_title('Rate relative to velocity-pointing reference frame')
+    # Plot 2: Attitude error relative to velocity-pointing reference
+    axes[2].plot(time_min, sigma_BR[:, 0], label='σ1 error')
+    axes[2].plot(time_min, sigma_BR[:, 1], label='σ2 error')
+    axes[2].plot(time_min, sigma_BR[:, 2], label='σ3 error')
+    axes[2].set_ylabel('σ_BR [-]')
+    axes[2].set_title('Attitude error relative to velocity-pointing reference')
     axes[2].legend()
     axes[2].grid(True)
 
-    axes[3].plot(time_min, sigma_BN[:, 0], label='σ1')
-    axes[3].plot(time_min, sigma_BN[:, 1], label='σ2')
-    axes[3].plot(time_min, sigma_BN[:, 2], label='σ3')
-    axes[3].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
-    axes[3].set_ylabel('σ_BN [-]')
-    axes[3].set_title('Inertial attitude MRPs')
-    axes[3].legend()
+    # Plot 3: Magnetometer (TAM) measurement magnitude
+    axes[3].plot(time_min, np.linalg.norm(B_tam_S_nT, axis=1), color='tab:green')
+    axes[3].set_ylabel('|B| [nT]')
+    axes[3].set_title('TAM magnitude')
     axes[3].grid(True)
 
-    axes[4].plot(time_min, sigma_BR[:, 0], label='σ1 error')
-    axes[4].plot(time_min, sigma_BR[:, 1], label='σ2 error')
-    axes[4].plot(time_min, sigma_BR[:, 2], label='σ3 error')
-    axes[4].set_ylabel('σ_BR [-]')
-    axes[4].set_title('Attitude error relative to velocity-pointing reference')
+    # Plot 4: Commanded magnetorquer (MTB) dipole moments
+    axes[4].plot(time_min, dipole_cmd[:, 0], label='mx')
+    axes[4].plot(time_min, dipole_cmd[:, 1], label='my')
+    axes[4].plot(time_min, dipole_cmd[:, 2], label='mz')
+    axes[4].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[4].set_ylabel('Dipole [A·m²]')
+    axes[4].set_title('Commanded MTB dipoles')
     axes[4].legend()
     axes[4].grid(True)
 
-    axes[5].plot(time_min, body_x_to_velocity_deg, label='Body +X to velocity (ram)', linewidth=2)
-    axes[5].plot(time_min, body_x_to_ref_y_deg, label='Body +X to ref Y (≈radial inward)')
-    axes[5].plot(time_min, body_z_to_orbit_normal_deg, label='Body +Z to orbit normal')
-    axes[5].set_ylabel('Angle [deg]')
-    axes[5].set_title('Velocity-pointing frame alignment diagnostics')
-    axes[5].legend(loc='best')
+    # Plot 5: Applied magnetorquer torques on spacecraft body
+    axes[5].plot(time_min, torque_mtb_uNm[:, 0], label='τx MTB')
+    axes[5].plot(time_min, torque_mtb_uNm[:, 1], label='τy MTB')
+    axes[5].plot(time_min, torque_mtb_uNm[:, 2], label='τz MTB')
+    axes[5].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[5].set_ylabel('MTB torque [µN·m]')
+    axes[5].set_title('Applied MTB torques')
+    axes[5].legend()
     axes[5].grid(True)
 
-    axes[6].plot(time_min, np.linalg.norm(B_tam_S_nT, axis=1), color='tab:green')
-    axes[6].set_ylabel('|B| [nT]')
-    axes[6].set_title('TAM magnitude')
+    # Plot 6: Applied aerodynamic torques on spacecraft body
+    axes[6].plot(time_min, torque_aero_uNm[:, 0], label='τx aero')
+    axes[6].plot(time_min, torque_aero_uNm[:, 1], label='τy aero')
+    axes[6].plot(time_min, torque_aero_uNm[:, 2], label='τz aero')
+    axes[6].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[6].set_ylabel('Aero torque [µN·m]')
+    axes[6].set_xlabel('Time [min]')
+    axes[6].set_title('Applied aerodynamic torques')
+    axes[6].legend()
     axes[6].grid(True)
 
-    axes[7].plot(time_min, dipole_cmd[:, 0], label='mx')
-    axes[7].plot(time_min, dipole_cmd[:, 1], label='my')
-    axes[7].plot(time_min, dipole_cmd[:, 2], label='mz')
-    axes[7].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
-    axes[7].set_ylabel('Dipole [A·m²]')
-    axes[7].set_title('Commanded MTB dipoles')
-    axes[7].legend()
-    axes[7].grid(True)
-
-    axes[8].plot(time_min, torque_mtb_uNm[:, 0], label='τx MTB')
-    axes[8].plot(time_min, torque_mtb_uNm[:, 1], label='τy MTB')
-    axes[8].plot(time_min, torque_mtb_uNm[:, 2], label='τz MTB')
-    axes[8].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
-    axes[8].set_ylabel('MTB torque [µN·m]')
-    axes[8].set_title('Applied MTB torques')
-    axes[8].legend()
-    axes[8].grid(True)
-
-    axes[9].plot(time_min, torque_aero_uNm[:, 0], label='τx aero')
-    axes[9].plot(time_min, torque_aero_uNm[:, 1], label='τy aero')
-    axes[9].plot(time_min, torque_aero_uNm[:, 2], label='τz aero')
-    axes[9].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
-    axes[9].set_ylabel('Aero torque [µN·m]')
-    axes[9].set_xlabel('Time [min]')
-    axes[9].set_title('Applied aerodynamic torques')
-    axes[9].legend()
-    axes[9].grid(True)
-
     plt.tight_layout()
-    plt.savefig('zero_torque_diagnostic.png', dpi=150)
+    plt.savefig('velocity_pointing_adcs_results.png', dpi=150)
     plt.show()
 
     return {
@@ -789,4 +777,4 @@ def run_zero_torque_diagnostic():
 
 
 if __name__ == "__main__":
-    run_zero_torque_diagnostic()
+    run_adcs_sim()
