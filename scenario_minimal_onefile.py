@@ -28,11 +28,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 from scipy.io import loadmat
+from scipy.spatial.transform import Rotation
 from Basilisk.utilities import SimulationBaseClass, macros
 from Basilisk.utilities import simIncludeGravBody, orbitalMotion, RigidBodyKinematics as rbk
 from Basilisk.simulation import spacecraft, magnetometer, MtbEffector, extForceTorque, simpleNav
 from Basilisk.fswAlgorithms import hillPoint, mrpFeedback, attTrackingError
 from Basilisk.architecture import messaging, sysModel, bskLogging
+
+from horizon_estimation.minimal_attitude_estimator import MinimalAttitudeEstimator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -122,6 +125,179 @@ class VelocityPointingReference(sysModel.SysModel):
         attRefOut.domega_RN_N = [0.0, 0.0, 0.0]
 
         self.attRefOutMsg.write(attRefOut, self.moduleID, currentTime)
+
+
+def compute_velocity_reference_dcm(r_BN_N: np.ndarray, v_BN_N: np.ndarray) -> np.ndarray:
+    """
+    Build the velocity-pointing reference DCM C_RN.
+
+    This helper centralizes the scenario's reference-frame definition so both the
+    truth/reference path and the horizon-estimator path use the same R frame:
+    +X_R along velocity, +Z_R along orbit normal, +Y_R completing the
+    right-handed triad.
+    """
+    r_mag = np.linalg.norm(r_BN_N)
+    v_mag = np.linalg.norm(v_BN_N)
+    if r_mag < 1e-6 or v_mag < 1e-6:
+        raise ValueError("Reference frame is undefined for near-zero position or velocity magnitude.")
+
+    x_R_N = v_BN_N / v_mag
+    h_vec = np.cross(r_BN_N, v_BN_N)
+    h_mag = np.linalg.norm(h_vec)
+    if h_mag < 1e-10:
+        z_R_N = np.array([0.0, 0.0, 1.0])
+    else:
+        z_R_N = h_vec / h_mag
+
+    y_R_N = np.cross(z_R_N, x_R_N)
+    y_R_N = y_R_N / np.linalg.norm(y_R_N)
+    return np.vstack([x_R_N, y_R_N, z_R_N])
+
+
+def dcm_br_to_estimator_angles(C_BR: np.ndarray) -> tuple[float, float, float]:
+    """
+    Convert body-vs-reference attitude into the horizon estimator's angle set.
+
+    Convention used here:
+    - angles are relative to the velocity-pointing reference frame R
+    - rotations are intrinsic/body-fixed
+    - pitch is rotation about body X
+    - roll is rotation about body Y
+    - yaw is rotation about body Z
+
+    The estimator mostly solves pitch and roll from the horizon geometry. Yaw is
+    still passed through so the simulated sensor frames and reconstructed attitude
+    remain consistent with the current spacecraft heading.
+    """
+    rot = Rotation.from_matrix(np.asarray(C_BR, dtype=float))
+    pitch_deg, roll_deg, yaw_deg = rot.as_euler("XYZ", degrees=True)
+    return float(pitch_deg), float(roll_deg), float(yaw_deg)
+
+
+def estimator_angles_to_dcm_br(pitch_deg: float, roll_deg: float, yaw_deg: float) -> np.ndarray:
+    """
+    Reconstruct C_BR from the estimator angle convention.
+
+    This must stay as the inverse of `dcm_br_to_estimator_angles`. If the
+    estimator axis or rotation-order convention changes, update both functions
+    together or the estimated attitude will be mapped into the wrong frame.
+    """
+    rot = Rotation.from_euler("XYZ", [pitch_deg, roll_deg, yaw_deg], degrees=True)
+    return rot.as_matrix()
+
+
+class EarthHorizonAttitudeNav(sysModel.SysModel):
+    """
+    Estimator-backed attitude navigation source for horizon-based current attitude.
+
+    This module is intended to sit in the same part of the guidance pipeline as
+    `simpleNav.attOutMsg`, but it publishes an estimated current spacecraft
+    attitude derived from the horizon estimator instead of direct truth-like nav.
+
+    Important frame note:
+    - truth from the spacecraft state is available as body-vs-inertial C_BN
+    - the controller's pointing objective is defined against the velocity-pointing
+      reference frame R
+    - the horizon estimator should therefore operate on body-vs-reference C_BR,
+      not directly on inertial attitude
+
+    The module converts:
+    C_BN -> C_BR -> estimator pitch/roll/yaw -> estimated C_BR -> estimated C_BN
+    """
+
+    def __init__(
+        self,
+        sim_fps: float = 20.0,
+        poll_rate: float = 20.0,
+        switch_margin: float = 7.0,
+        valid_window: int = 3,
+        pitch_continuity_deg: float = 10.0,
+    ):
+        super().__init__()
+        self.ModelTag = "EarthHorizonAttitudeNav"
+
+        self.scStateInMsg = messaging.SCStatesMsgReader()
+        self.transNavInMsg = messaging.NavTransMsgReader()
+        self.attOutMsg = messaging.NavAttMsg()
+
+        self.estimator = MinimalAttitudeEstimator(
+            yaw_deg=0.0,
+            sim_fps=sim_fps,
+            poll_rate=poll_rate,
+            switch_margin=switch_margin,
+            valid_window=valid_window,
+            pitch_continuity_deg=pitch_continuity_deg,
+        )
+        self.last_time_s: float | None = None
+
+    def Reset(self, currentTime):
+        if not self.scStateInMsg.isLinked():
+            bskLogging.bskLog(
+                bskLogging.BSK_ERROR,
+                f"{self.ModelTag}.scStateInMsg is not linked."
+            )
+        if not self.transNavInMsg.isLinked():
+            bskLogging.bskLog(
+                bskLogging.BSK_ERROR,
+                f"{self.ModelTag}.transNavInMsg is not linked."
+            )
+
+        att_out = messaging.NavAttMsgPayload()
+        att_out.sigma_BN = [0.0, 0.0, 0.0]
+        att_out.omega_BN_B = [0.0, 0.0, 0.0]
+        self.attOutMsg.write(att_out, self.moduleID, currentTime)
+
+    def UpdateState(self, currentTime):
+        if not self.scStateInMsg.isWritten() or not self.transNavInMsg.isWritten():
+            return
+
+        sc_state = self.scStateInMsg()
+        nav_data = self.transNavInMsg()
+
+        sigma_BN = np.array(sc_state.sigma_BN, dtype=float)
+        omega_BN_B = np.array(sc_state.omega_BN_B, dtype=float)
+        r_BN_N = np.array(nav_data.r_BN_N, dtype=float)
+        v_BN_N = np.array(nav_data.v_BN_N, dtype=float)
+
+        try:
+            C_RN = compute_velocity_reference_dcm(r_BN_N, v_BN_N)
+        except ValueError:
+            return
+
+        C_BN = np.array(rbk.MRP2C(sigma_BN))
+        C_BR = C_BN @ C_RN.T
+
+        # Feed the estimator with attitude expressed in the same reference frame
+        # the pointing controller uses. That keeps the estimated "current
+        # attitude" comparable to the commanded velocity-pointing reference.
+        true_pitch_deg, true_roll_deg, true_yaw_deg = dcm_br_to_estimator_angles(C_BR)
+
+        time_s = currentTime * macros.NANO2SEC
+        dt_s = None if self.last_time_s is None else float(time_s - self.last_time_s)
+        self.last_time_s = float(time_s)
+
+        est = self.estimator.update(
+            true_pitch_deg=true_pitch_deg,
+            true_roll_deg=true_roll_deg,
+            dt_s=dt_s,
+            yaw_deg=true_yaw_deg,
+        )
+
+        # The estimator currently provides the pitch/roll content of the current
+        # spacecraft attitude. Yaw remains supplied from the truth/reference-side
+        # decomposition because the horizon geometry alone does not strongly
+        # observe yaw.
+        C_BR_est = estimator_angles_to_dcm_br(
+            pitch_deg=est.estimated_pitch_deg,
+            roll_deg=est.estimated_roll_deg,
+            yaw_deg=true_yaw_deg,
+        )
+        C_BN_est = C_BR_est @ C_RN
+
+        att_out = messaging.NavAttMsgPayload()
+        att_out.sigma_BN = rbk.C2MRP(C_BN_est).tolist()
+        att_out.omega_BN_B = omega_BN_B.tolist()
+        self.attOutMsg.write(att_out, self.moduleID, currentTime)
 
 
 class SimpleMagneticField(sysModel.SysModel):
@@ -577,10 +753,23 @@ def run_adcs_sim():
     velPointModule.transNavInMsg.subscribeTo(simpleNavModule.transOutMsg)
     scSim.AddModelToTask(simTaskName, velPointModule, 89)
 
+    # Horizon-estimator-backed current attitude source. This keeps translational
+    # navigation from SimpleNav, but replaces the attitude handed to
+    # trackingError with the estimated body attitude reconstructed from the
+    # horizon estimator.
+    earthHorizonNav = EarthHorizonAttitudeNav(
+        sim_fps=1.0 / sim_dt,
+        poll_rate=1.0 / sim_dt,
+    )
+    earthHorizonNav.ModelTag = "EarthHorizonAttitudeNav"
+    earthHorizonNav.scStateInMsg.subscribeTo(scObject.scStateOutMsg)
+    earthHorizonNav.transNavInMsg.subscribeTo(simpleNavModule.transOutMsg)
+    scSim.AddModelToTask(simTaskName, earthHorizonNav, 90)
+
     trackingError = attTrackingError.attTrackingError()
     trackingError.ModelTag = "attTrackingError"
     trackingError.attRefInMsg.subscribeTo(velPointModule.attRefOutMsg)
-    trackingError.attNavInMsg.subscribeTo(simpleNavModule.attOutMsg)
+    trackingError.attNavInMsg.subscribeTo(earthHorizonNav.attOutMsg)
     scSim.AddModelToTask(simTaskName, trackingError, 88)
 
     # MRP feedback control for 3-axis attitude control
@@ -635,6 +824,7 @@ def run_adcs_sim():
     tamLog = TAM.tamDataOutMsg.recorder()
     mtbLog = MTB.mtbOutMsg.recorder()
     bdotLog = bdot.cmdOutMsg.recorder()
+    ehNavLog = earthHorizonNav.attOutMsg.recorder()
     velRefLog = velPointModule.attRefOutMsg.recorder()
     trackingErrLog = trackingError.attGuidOutMsg.recorder()
     mrpLog = mrpControl.cmdTorqueOutMsg.recorder()
@@ -646,6 +836,7 @@ def run_adcs_sim():
     scSim.AddModelToTask(simTaskName, tamLog)
     scSim.AddModelToTask(simTaskName, mtbLog)
     scSim.AddModelToTask(simTaskName, bdotLog)
+    scSim.AddModelToTask(simTaskName, ehNavLog)
     scSim.AddModelToTask(simTaskName, velRefLog)
     scSim.AddModelToTask(simTaskName, trackingErrLog)
     scSim.AddModelToTask(simTaskName, mrpLog)
