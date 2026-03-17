@@ -33,7 +33,7 @@ from Basilisk.utilities import simIncludeGravBody, orbitalMotion, RigidBodyKinem
 from Basilisk.simulation import spacecraft, magnetometer, MtbEffector, extForceTorque, simpleNav
 from Basilisk.fswAlgorithms import hillPoint, mrpFeedback, attTrackingError
 from Basilisk.architecture import messaging, sysModel, bskLogging
-
+import Basilisk.simulation.vizInterface as vizInterface
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 from Basilisk import __path__
@@ -168,7 +168,7 @@ class SimpleBdot(sysModel.SysModel):
 
     def __init__(self):
         super().__init__()
-        self.k_gain = 0.0
+        self.k_gain = 1.0   # Gain for B-dot control [A·m²·s/T²]
         self.maxDipole = 0.016
         self.dt = 1.0
         self.B_prev = np.zeros(3)
@@ -555,7 +555,7 @@ def run_adcs_sim():
     # ------------------------------------------------------------------
     bdot = SimpleBdot()
     bdot.ModelTag = "Bdot"
-    bdot.k_gain = 1e6
+    bdot.k_gain = 0.100
     bdot.maxDipole = 0.016
     bdot.dt = sim_dt
     bdot.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
@@ -662,23 +662,15 @@ def run_adcs_sim():
         saveFile=fileName,
         liveStream=False
     )
-    vizSupport.setActuatorGuiSetting(viz, viewRWPanel=True, viewRWHUD=True)
-    if vizSupport.vizFound:
+    if  vizSupport.vizFound:
         print('vizfound')
-        # 1. Enable Rate Visualization (Shows omega vectors in Vizard)
+        # Force these on by default in the .bin file
         viz.settings.showAngularVelocityVectors = True
-        
-        # 2. Set Default Playback Speed (How fast the clock runs in Vizard)
-        # 1.0 is realtime; 10.0 is 10x faster.
-        viz.settings.guiPlaybackSpeed = 100.0
-        
-        # 3. Optional: Add a CSS-style panel to see the rates in numbers
-        viz.settings.showDataPanel = True
-        
-        # 4. Optional: Show the Magnetometer (TAM) and Magnetorquer (MTB) vectors
-        # This helps you see the B-dot and control torque directions
+        viz.settings.showMtbForceVectors = True  
+        viz.settings.showMtbDipoleVectors = True 
         viz.settings.showMagneticFieldVectors = True
-        viz.settings.showMtbForceVectors = True
+        viz.settings.showDataPanel = True        
+        viz.settings.guiPlaybackSpeed = 100.0
     # ------------------------------------------------------------------
     # RUN
     # ------------------------------------------------------------------
