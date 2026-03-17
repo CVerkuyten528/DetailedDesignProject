@@ -663,12 +663,13 @@ def run_adcs_sim():
         liveStream=False
     )
     if vizSupport.vizFound:
+        print('vizfound')
         # 1. Enable Rate Visualization (Shows omega vectors in Vizard)
         viz.settings.showAngularVelocityVectors = True
         
         # 2. Set Default Playback Speed (How fast the clock runs in Vizard)
         # 1.0 is realtime; 10.0 is 10x faster.
-        viz.settings.guiPlaybackSpeed = 5.0
+        viz.settings.guiPlaybackSpeed = 10.0
         
         # 3. Optional: Add a CSS-style panel to see the rates in numbers
         viz.settings.showDataPanel = True
