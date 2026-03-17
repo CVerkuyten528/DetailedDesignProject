@@ -21,6 +21,8 @@ The spacecraft starts tumbling and uses B-dot control to detumble, then switches
 to velocity-pointing attitude control using magnetorquers for actuation.
 """
 
+import os
+
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -34,6 +36,9 @@ from Basilisk.architecture import messaging, sysModel, bskLogging
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+from Basilisk import __path__
+bskPath = __path__[0]
+fileName = os.path.basename(os.path.splitext(__file__)[0])
 
 
 class VelocityPointingReference(sysModel.SysModel):
@@ -650,12 +655,13 @@ def run_adcs_sim():
 
     from Basilisk.utilities import vizSupport
 
-    # viz = vizSupport.enableUnityVisualization(
-    #     scSim,
-    #     simTaskName,
-    #     scObject,
-    #     liveStream=True
-    # )
+    viz = vizSupport.enableUnityVisualization(
+        scSim,
+        simTaskName,
+        scObject,
+        saveFile=fileName,
+        liveStream=False
+    )
 
     # ------------------------------------------------------------------
     # RUN
