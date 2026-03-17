@@ -662,7 +662,21 @@ def run_adcs_sim():
         saveFile=fileName,
         liveStream=False
     )
-
+    if vizSupport.vizFound:
+        # 1. Enable Rate Visualization (Shows omega vectors in Vizard)
+        viz.settings.showAngularVelocityVectors = True
+        
+        # 2. Set Default Playback Speed (How fast the clock runs in Vizard)
+        # 1.0 is realtime; 10.0 is 10x faster.
+        viz.settings.guiPlaybackSpeed = 5.0
+        
+        # 3. Optional: Add a CSS-style panel to see the rates in numbers
+        viz.settings.showDataPanel = True
+        
+        # 4. Optional: Show the Magnetometer (TAM) and Magnetorquer (MTB) vectors
+        # This helps you see the B-dot and control torque directions
+        viz.settings.showMagneticFieldVectors = True
+        viz.settings.showMtbForceVectors = True
     # ------------------------------------------------------------------
     # RUN
     # ------------------------------------------------------------------
