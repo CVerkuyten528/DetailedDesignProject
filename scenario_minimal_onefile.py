@@ -513,9 +513,9 @@ def run_adcs_sim():
     TAM = magnetometer.Magnetometer()
     TAM.ModelTag = "TAM"
     TAM.scaleFactor = 1.0
-    TAM.senNoiseStd = [0.0, 0.0, 0.0]
-    TAM.maxOutput = 100e-6
-    TAM.minOutput = -100e-6
+    TAM.senNoiseStd = [15e-9, 15e-9, 150-9]
+    TAM.maxOutput = 800e-6
+    TAM.minOutput = -800e-6
     TAM.dcm_SB = [
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
