@@ -36,87 +36,66 @@ from Basilisk.architecture import messaging, sysModel, bskLogging
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-class VelocityPointingReference(sysModel.SysModel):
+class NadirPDControl(sysModel.SysModel):
     """
-    Velocity-pointing reference frame generator.
+    Nadir pointing control using cross product error.
 
-    Reference frame R:
-    - +X_R: velocity direction (ram)
-    - +Z_R: orbit normal (h = r × v)
-    - +Y_R: Z_R × X_R (completes right-handed frame, ~radially inward)
+    Calculates roll and pitch error by comparing a chosen body axis (e3) 
+    with the Nadir vector (n_B) in the body frame.
+    Control Law: tau = -Kp * (e3 x n_B) - Kd * omega_B
     """
-
     def __init__(self):
         super().__init__()
-        self.ModelTag = "VelocityPointing"
+        self.ModelTag = "NadirPDControl"
 
         self.transNavInMsg = messaging.NavTransMsgReader()
-        self.attRefOutMsg = messaging.AttRefMsg()
+        self.attNavInMsg = messaging.NavAttMsgReader()
+        self.cmdTorqueOutMsg = messaging.CmdTorqueBodyMsg()
 
-    def Reset(self, currentTime):
-        if not self.transNavInMsg.isLinked():
-            bskLogging.bskLog(
-                bskLogging.BSK_ERROR,
-                f"{self.ModelTag}.transNavInMsg is not linked."
-            )
+        self.Kp = 0.005  # Proportional gain
+        self.Kd = 0.01   # Derivative gain
+        self.align_axis = np.array([0.0, 0.0, 1.0])  # Body axis to point at Nadir
 
-        attRefOut = messaging.AttRefMsgPayload()
-        attRefOut.sigma_RN = [0.0, 0.0, 0.0]
-        attRefOut.omega_RN_N = [0.0, 0.0, 0.0]
-        attRefOut.domega_RN_N = [0.0, 0.0, 0.0]
-        self.attRefOutMsg.write(attRefOut, self.moduleID, currentTime)
+    def Reset(self, CurrentSimNanos):
+        payload = self.cmdTorqueOutMsg.zeroMsgPayload
+        self.cmdTorqueOutMsg.write(payload, CurrentSimNanos, self.moduleID)
 
-    def UpdateState(self, currentTime):
-        if not self.transNavInMsg.isWritten():
+    def UpdateState(self, CurrentSimNanos):
+        if not self.transNavInMsg.isWritten() or not self.attNavInMsg.isWritten():
             return
 
-        navData = self.transNavInMsg()
-
-        r_BN_N = np.array(navData.r_BN_N, dtype=float)
-        v_BN_N = np.array(navData.v_BN_N, dtype=float)
+        r_BN_N = np.array(self.transNavInMsg().r_BN_N, dtype=float)
+        v_BN_N = np.array(self.transNavInMsg().v_BN_N, dtype=float)
+        sigma_BN = np.array(self.attNavInMsg().sigma_BN, dtype=float)
+        omega_BN_B = np.array(self.attNavInMsg().omega_BN_B, dtype=float)
 
         r_mag = np.linalg.norm(r_BN_N)
-        v_mag = np.linalg.norm(v_BN_N)
-
-        if r_mag < 1e-6 or v_mag < 1e-6:
-            attRefOut = messaging.AttRefMsgPayload()
-            attRefOut.sigma_RN = [0.0, 0.0, 0.0]
-            attRefOut.omega_RN_N = [0.0, 0.0, 0.0]
-            attRefOut.domega_RN_N = [0.0, 0.0, 0.0]
-            self.attRefOutMsg.write(attRefOut, self.moduleID, currentTime)
+        if r_mag < 1e-6:
             return
 
-        # Reference frame R with +X along velocity
-        x_R_N = v_BN_N / v_mag  # velocity direction
+        # Nadir vector in inertial frame (towards Earth center)
+        nadir_N = -r_BN_N / r_mag
 
-        # Orbit normal
-        h_vec = np.cross(r_BN_N, v_BN_N)
-        h_mag = np.linalg.norm(h_vec)
-        if h_mag < 1e-10:
-            z_R_N = np.array([0.0, 0.0, 1.0])
-        else:
-            z_R_N = h_vec / h_mag
+        # Convert Nadir vector to body frame
+        C_BN = np.array(rbk.MRP2C(sigma_BN))
+        nadir_B = C_BN @ nadir_N # [-sin roll cos pitch ; sin pitch; 0] change once earth horizo
 
-        # Complete right-handed frame
-        y_R_N = np.cross(z_R_N, x_R_N)
-        y_R_N = y_R_N / np.linalg.norm(y_R_N)
+        # Cross product error (e3 x n) gives the rotation axis to align e3 with n
+        error_vec = np.cross(self.align_axis, nadir_B)
 
-        # DCM from inertial to reference frame
-        C_RN = np.vstack([x_R_N, y_R_N, z_R_N])
-        sigma_RN = rbk.C2MRP(C_RN)
+        # Calculate rotating frame rate to damp relative, not inertial, rotation
+        h_N = np.cross(r_BN_N, v_BN_N)
+        omega_RN_N = h_N / (r_mag**2) # Orbital rate vector
+        omega_RN_B = C_BN @ omega_RN_N
+        omega_err_B = omega_BN_B - omega_RN_B
 
-        # Angular velocity of reference frame
-        # omega_RN = d(C_RN)/dt * C_NR^T
-        # For circular orbit approximation: omega is along h direction
-        omega_orb = v_mag / r_mag  # approximate orbital rate
-        omega_RN_N = omega_orb * z_R_N
+        # Control torque (PD law)
+        # Note: +Kp is used because e3 x n points in the direction we need to torque
+        tau = self.Kp * error_vec - self.Kd * omega_err_B
 
-        attRefOut = messaging.AttRefMsgPayload()
-        attRefOut.sigma_RN = sigma_RN.tolist()
-        attRefOut.omega_RN_N = omega_RN_N.tolist()
-        attRefOut.domega_RN_N = [0.0, 0.0, 0.0]
-
-        self.attRefOutMsg.write(attRefOut, self.moduleID, currentTime)
+        payload = self.cmdTorqueOutMsg.zeroMsgPayload
+        payload.torqueRequestBody = tau.tolist()
+        self.cmdTorqueOutMsg.write(payload, CurrentSimNanos, self.moduleID)
 
 
 class SimpleMagneticField(sysModel.SysModel):
@@ -428,7 +407,7 @@ class AeroTorqueFromTable(sysModel.SysModel):
 
 def run_adcs_sim():
     sim_dt = 0.1
-    stop_time = 3*5400.0
+    stop_time = 10*5400.0
 
     scSim = SimulationBaseClass.SimBaseClass()
     simProcessName = "simProcess"
@@ -465,7 +444,7 @@ def run_adcs_sim():
 
     # Define orbital elements for Sun-synchronous LEO orbit
     oe = orbitalMotion.ClassicElements()
-    oe.a = 6771000.0  # Semi-major axis [m] (~400 km altitude)
+    oe.a = 6671000.0  # Semi-major axis [m] (~400 km altitude)
     oe.e = 0.0001  # Eccentricity (near-circular)
     oe.i = 97.0 * macros.D2R  # Inclination [rad] (sun-synchronous)
     oe.Omega = 0.0  # Right ascension of ascending node [rad]
@@ -551,7 +530,7 @@ def run_adcs_sim():
     bdot = SimpleBdot()
     bdot.ModelTag = "Bdot"
     bdot.k_gain = 1e6
-    bdot.maxDipole = 0.016
+    bdot.maxDipole = 0.004
     bdot.dt = sim_dt
     bdot.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
     scSim.AddModelToTask(simTaskName, bdot, 80)
@@ -565,46 +544,24 @@ def run_adcs_sim():
     scSim.AddModelToTask(simTaskName, simpleNavModule, 91)
 
     # ------------------------------------------------------------------
-    # VELOCITY-POINTING REFERENCE
+    # NADIR PD CONTROL
     # ------------------------------------------------------------------
-    velPointModule = VelocityPointingReference()
-    velPointModule.ModelTag = "VelocityPointing"
-    velPointModule.transNavInMsg.subscribeTo(simpleNavModule.transOutMsg)
-    scSim.AddModelToTask(simTaskName, velPointModule, 89)
-
-    trackingError = attTrackingError.attTrackingError()
-    trackingError.ModelTag = "attTrackingError"
-    trackingError.attRefInMsg.subscribeTo(velPointModule.attRefOutMsg)
-    trackingError.attNavInMsg.subscribeTo(simpleNavModule.attOutMsg)
-    scSim.AddModelToTask(simTaskName, trackingError, 88)
-
-    # MRP feedback control for 3-axis attitude control
-    mrpControl = mrpFeedback.mrpFeedback()
-    mrpControl.ModelTag = "mrpFeedback"
-    mrpControl.K = 0.01  # Derivative gain [N*m*s] (damping)
-    mrpControl.P = 0.005  # Proportional gain [N*m] (stiffness)
-    mrpControl.Ki = 0.0001  # Integral gain [N*m/s] (bias rejection)
-    mrpControl.integralLimit = 2.0 / 180.0 * np.pi  # 2 deg integral windup limit [rad]
-    mrpControl.guidInMsg.subscribeTo(trackingError.attGuidOutMsg)
-
-    vcMsg = messaging.VehicleConfigMsg()
-    vcData = messaging.VehicleConfigMsgPayload()
-    vcData.ISCPntB_B = [
-        0.0015, 0.0, 0.0,
-        0.0, 0.0062, 0.0,
-        0.0, 0.0, 0.0062
-    ]
-    vcMsg.write(vcData)
-    mrpControl.vehConfigInMsg.subscribeTo(vcMsg)
-    scSim.AddModelToTask(simTaskName, mrpControl, 87)
+    nadirControl = NadirPDControl()
+    nadirControl.ModelTag = "NadirPDControl"
+    nadirControl.Kp = 0.005  # Proportional gain [N*m]
+    nadirControl.Kd = 0.01   # Derivative gain [N*m*s]
+    nadirControl.align_axis = np.array([0.0, 0.0, 1.0])  # Body Z-axis pointing at Nadir
+    nadirControl.transNavInMsg.subscribeTo(simpleNavModule.transOutMsg)
+    nadirControl.attNavInMsg.subscribeTo(simpleNavModule.attOutMsg)
+    scSim.AddModelToTask(simTaskName, nadirControl, 89)
 
     magMomentumCtrl = MagneticMomentumManagement()
     magMomentumCtrl.ModelTag = "MagMomentum"
     magMomentumCtrl.maxDipole = 0.016
-    # Disable X-axis dipole, enable Y+Z dipoles to avoid interfering with primary control axis
-    magMomentumCtrl.activeAxes = [False, True, True]  # [X, Y, Z]
+    # Disable/enable dipoles
+    magMomentumCtrl.activeAxes = [True, True, True]  # [X, Y, Z]
     magMomentumCtrl.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
-    magMomentumCtrl.cmdTorqueInMsg.subscribeTo(mrpControl.cmdTorqueOutMsg)
+    magMomentumCtrl.cmdTorqueInMsg.subscribeTo(nadirControl.cmdTorqueOutMsg)
     scSim.AddModelToTask(simTaskName, magMomentumCtrl, 85)
 
     # ------------------------------------------------------------------
@@ -630,9 +587,7 @@ def run_adcs_sim():
     tamLog = TAM.tamDataOutMsg.recorder()
     mtbLog = MTB.mtbOutMsg.recorder()
     bdotLog = bdot.cmdOutMsg.recorder()
-    velRefLog = velPointModule.attRefOutMsg.recorder()
-    trackingErrLog = trackingError.attGuidOutMsg.recorder()
-    mrpLog = mrpControl.cmdTorqueOutMsg.recorder()
+    controlLog = nadirControl.cmdTorqueOutMsg.recorder()
     nadirLog = magMomentumCtrl.cmdOutMsg.recorder()
     modeLog = modeSwitch.cmdOutMsg.recorder()
     aeroLog = aeroTorque.cmdTorqueOutMsg.recorder()
@@ -641,14 +596,12 @@ def run_adcs_sim():
     scSim.AddModelToTask(simTaskName, tamLog)
     scSim.AddModelToTask(simTaskName, mtbLog)
     scSim.AddModelToTask(simTaskName, bdotLog)
-    scSim.AddModelToTask(simTaskName, velRefLog)
-    scSim.AddModelToTask(simTaskName, trackingErrLog)
-    scSim.AddModelToTask(simTaskName, mrpLog)
+    scSim.AddModelToTask(simTaskName, controlLog)
     scSim.AddModelToTask(simTaskName, nadirLog)
     scSim.AddModelToTask(simTaskName, modeLog)
     scSim.AddModelToTask(simTaskName, aeroLog)
 
-    from Basilisk.utilities import vizSupport
+    from Basilisk.utilities import vizSupport 
 
     # viz = vizSupport.enableUnityVisualization(
     #     scSim,
@@ -672,11 +625,19 @@ def run_adcs_sim():
     omega_BN_B = np.array(scLog.omega_BN_B)
     omega_BN_mag = np.linalg.norm(omega_BN_B, axis=1)
 
-    omega_BR_B = np.array(trackingErrLog.omega_BR_B)
-    omega_BR_mag = np.linalg.norm(omega_BR_B, axis=1)
-
     sigma_BN = np.array(scLog.sigma_BN)
-    sigma_BR = np.array(trackingErrLog.sigma_BR)
+    r_BN_N = np.array(scLog.r_BN_N)
+
+    # Calculate nadir tracking error (angle between body z-axis and literal moving nadir)
+    body_z_to_nadir_deg = np.zeros(len(sigma_BN))
+    for i in range(len(sigma_BN)):
+        rN = r_BN_N[i]
+        r_mag = np.linalg.norm(rN)
+        if r_mag > 1e-6:
+            nadir_N = -rN / r_mag
+            C_BN = np.array(rbk.MRP2C(sigma_BN[i]))
+            nadir_B = C_BN @ nadir_N
+            body_z_to_nadir_deg[i] = np.degrees(np.arccos(np.clip(nadir_B[2], -1.0, 1.0)))
 
     B_tam_S_nT = np.array(tamLog.tam_S) * 1e9
     dipole_cmd = np.array(modeLog.mtbDipoleCmds)
@@ -692,12 +653,12 @@ def run_adcs_sim():
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(7, 1, figsize=(12, 26), sharex=True)
 
-    # Plot 0: Body rate relative to velocity-pointing reference frame
-    axes[0].plot(time_min, omega_BR_mag * macros.R2D, color='tab:purple', label='|ω_BR|')
+    # Plot 0: Body rate
+    axes[0].plot(time_min, omega_BN_mag * macros.R2D, color='tab:purple', label='|ω_BN|')
     axes[0].axhline(n_orbital * macros.R2D, color='r', linestyle='--',
                     label=f'orbital rate ≈ {n_orbital * macros.R2D:.4f} deg/s')
-    axes[0].set_ylabel('|ω_BR| [deg/s]')
-    axes[0].set_title('Rate relative to velocity-pointing reference frame')
+    axes[0].set_ylabel('|ω_BN| [deg/s]')
+    axes[0].set_title('Inertial body rate magnitude')
     axes[0].legend()
     axes[0].grid(True)
 
@@ -711,12 +672,10 @@ def run_adcs_sim():
     axes[1].legend()
     axes[1].grid(True)
 
-    # Plot 2: Attitude error relative to velocity-pointing reference
-    axes[2].plot(time_min, sigma_BR[:, 0], label='σ1 error')
-    axes[2].plot(time_min, sigma_BR[:, 1], label='σ2 error')
-    axes[2].plot(time_min, sigma_BR[:, 2], label='σ3 error')
-    axes[2].set_ylabel('σ_BR [-]')
-    axes[2].set_title('Attitude error relative to velocity-pointing reference')
+    # Plot 2: Nadir pointing error
+    axes[2].plot(time_min, body_z_to_nadir_deg, color='tab:orange', label='Nadir Error')
+    axes[2].set_ylabel('Angle [deg]')
+    axes[2].set_title('Body +Z alignment offset from Nadir')
     axes[2].legend()
     axes[2].grid(True)
 
@@ -770,9 +729,7 @@ def run_adcs_sim():
         "nadirLog": nadirLog,
         "modeLog": modeLog,
         "aeroLog": aeroLog,
-        "velRefLog": velRefLog,
-        "trackingErrLog": trackingErrLog,
-        "mrpLog": mrpLog
+        "controlLog": controlLog
     }
 
 
