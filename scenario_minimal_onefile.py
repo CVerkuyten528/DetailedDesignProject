@@ -21,6 +21,8 @@ The spacecraft starts tumbling and uses B-dot control to detumble, then switches
 to velocity-pointing attitude control using magnetorquers for actuation.
 """
 
+import os
+
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -31,9 +33,12 @@ from Basilisk.utilities import simIncludeGravBody, orbitalMotion, RigidBodyKinem
 from Basilisk.simulation import spacecraft, magnetometer, MtbEffector, extForceTorque, simpleNav
 from Basilisk.fswAlgorithms import hillPoint, mrpFeedback, attTrackingError
 from Basilisk.architecture import messaging, sysModel, bskLogging
-
+import Basilisk.simulation.vizInterface as vizInterface
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+from Basilisk import __path__
+bskPath = __path__[0]
+fileName = os.path.basename(os.path.splitext(__file__)[0])
 
 
 class NadirPDControl(sysModel.SysModel):
@@ -142,7 +147,7 @@ class SimpleBdot(sysModel.SysModel):
 
     def __init__(self):
         super().__init__()
-        self.k_gain = 0.0
+        self.k_gain = 1.0   # Gain for B-dot control [A·m²·s/T²]
         self.maxDipole = 0.016
         self.dt = 1.0
         self.B_prev = np.zeros(3)
@@ -492,9 +497,9 @@ def run_adcs_sim():
     TAM = magnetometer.Magnetometer()
     TAM.ModelTag = "TAM"
     TAM.scaleFactor = 1.0
-    TAM.senNoiseStd = [0.0, 0.0, 0.0]
-    TAM.maxOutput = 100e-6
-    TAM.minOutput = -100e-6
+    TAM.senNoiseStd = [15e-9, 15e-9, 15e-9]
+    TAM.maxOutput = 800e-6
+    TAM.minOutput = -800e-6
     TAM.dcm_SB = [
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
@@ -529,8 +534,8 @@ def run_adcs_sim():
     # ------------------------------------------------------------------
     bdot = SimpleBdot()
     bdot.ModelTag = "Bdot"
-    bdot.k_gain = 1e6
-    bdot.maxDipole = 0.004
+    bdot.k_gain = 0.100
+    bdot.maxDipole = 0.016
     bdot.dt = sim_dt
     bdot.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
     scSim.AddModelToTask(simTaskName, bdot, 80)
@@ -603,13 +608,22 @@ def run_adcs_sim():
 
     from Basilisk.utilities import vizSupport 
 
-    # viz = vizSupport.enableUnityVisualization(
-    #     scSim,
-    #     simTaskName,
-    #     scObject,
-    #     liveStream=True
-    # )
-
+    viz = vizSupport.enableUnityVisualization(
+        scSim,
+        simTaskName,
+        scObject,
+        saveFile=fileName,
+        liveStream=False
+    )
+    if  vizSupport.vizFound:
+        print('vizfound')
+        # Force these on by default in the .bin file
+        viz.settings.showAngularVelocityVectors = True
+        viz.settings.showMtbForceVectors = True  
+        viz.settings.showMtbDipoleVectors = True 
+        viz.settings.showMagneticFieldVectors = True
+        viz.settings.showDataPanel = True        
+        viz.settings.guiPlaybackSpeed = 100.0
     # ------------------------------------------------------------------
     # RUN
     # ------------------------------------------------------------------

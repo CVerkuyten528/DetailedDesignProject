@@ -94,7 +94,7 @@ class EarthHorizonSensorConfig:
 class MagnetorquerConfig:
     enabled: bool = True
     # Maximum dipole moment per axis [A·m²]
-    max_dipole_Am2: np.ndarray = field(default_factory=lambda: np.array([10.0, 10.0, 10.0]))
+    max_dipole_Am2: np.ndarray = field(default_factory=lambda: np.array([0.01, 0.01, 0.01]))
     # Torquer alignment matrix (body frame) - columns are dipole axes
     alignment_matrix_B: np.ndarray = field(default_factory=lambda: np.array([
         [1.0, 0.0, 0.0],
@@ -109,7 +109,7 @@ class MagneticFieldConfig:
 
 @dataclass
 class BdotConfig:
-    k_bdot: float = 1.0e6  # [A·m²·s/T²] gain
+    k_bdot: float = 1.0e5  # [A·m²·s/T²] gain
 
 @dataclass
 class SpacecraftConfig:
