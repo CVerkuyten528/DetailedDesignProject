@@ -147,7 +147,7 @@ class SimpleBdot(sysModel.SysModel):
 
     def __init__(self):
         super().__init__()
-        self.k_gain = 1.0   # Gain for B-dot control [A·m²·s/T²]
+        self.k_gain = 500   # Gain for B-dot control [A·m²·s/T²]
         self.maxDipole = 0.016
         self.dt = 1.0
         self.B_prev = np.zeros(3)
@@ -534,7 +534,7 @@ def run_adcs_sim():
     # ------------------------------------------------------------------
     bdot = SimpleBdot()
     bdot.ModelTag = "Bdot"
-    bdot.k_gain = 0.100
+    bdot.k_gain = 500
     bdot.maxDipole = 0.016
     bdot.dt = sim_dt
     bdot.tamInMsg.subscribeTo(TAM.tamDataOutMsg)
