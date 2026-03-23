@@ -412,7 +412,9 @@ class AeroTorqueFromTable(sysModel.SysModel):
 
 def run_adcs_sim():
     sim_dt = 0.1
-    stop_time = 10*5400.0
+    stop_time = 1*5400.0
+    altitude = 300000.0  # 300 km altitude
+    alpha = 30.0;  # Deployment angle for aerodynamic torque table selection choose from (0, 30, 60 ,90)
 
     scSim = SimulationBaseClass.SimBaseClass()
     simProcessName = "simProcess"
@@ -426,13 +428,7 @@ def run_adcs_sim():
     scObject = spacecraft.Spacecraft()
     scObject.ModelTag = "sat"
     scObject.hub.mHub = 0.75  # Spacecraft mass [kg]
-    scObject.hub.r_BcB_B = [[-0.0558], [0.0], [0.0]]  # Center of mass offset from body origin [m]
-    # Moment of inertia tensor about center of mass [kg*m^2]
-    scObject.hub.IHubPntBc_B = [
-        [0.0015, 0.0, 0.0],
-        [0.0, 0.0062, 0.0],
-        [0.0, 0.0, 0.0062]
-    ]
+    # r_BcB_B and IHubPntBc_B will be set after loading the .mat files
 
     # Initial attitude: 
     scObject.hub.sigma_BNInit = [[0.0], [0.0], [0.0]]
@@ -449,7 +445,7 @@ def run_adcs_sim():
 
     # Define orbital elements for Sun-synchronous LEO orbit
     oe = orbitalMotion.ClassicElements()
-    oe.a = 6671000.0  # Semi-major axis [m] (~400 km altitude)
+    oe.a = 6371000.0+altitude  # Semi-major axis [m] (~300 km altitude)
     oe.e = 0.0001  # Eccentricity (near-circular)
     oe.i = 97.0 * macros.D2R  # Inclination [rad] (sun-synchronous)
     oe.Omega = 0.0  # Right ascension of ascending node [rad]
@@ -462,15 +458,55 @@ def run_adcs_sim():
     scObject.hub.v_CN_NInit = vN
     gravFactory.addBodiesTo(scObject)
 
+
+
+    # ------------------------------------------------------------------
+    # TORQUE TABLE SCALING (density and velocity)
+    # ------------------------------------------------------------------
+    def get_density_exp(h_km):
+        # Simple exponential model, valid for 300-600 km
+        # Reference: US Standard Atmosphere, scale height ~59 km
+        rho0 = 2.3781e-11  # kg/m^3 at 300 km
+        h0 = 300.0  # km
+        H = 59.0    # km (scale height)
+        return rho0 * np.exp(-(h_km - h0) / H)
+
+    def get_orbital_velocity(a_m, mu=3.986004418e14):
+        return np.sqrt(mu / a_m)
+
+    # Reference values at 300 km
+    ref_alt_km = 300.0
+    ref_r_m = 6371000.0 + ref_alt_km * 1e3
+    rho_ref = 2.3781e-11
+    v_ref = get_orbital_velocity(ref_r_m, mu)
+
+    # Current values
+    alt_km = (oe.a - 6371000.0) / 1e3
+    rho = get_density_exp(alt_km)
+    v = get_orbital_velocity(oe.a, mu)
+
+    scale = (rho / rho_ref) * (v / v_ref) ** 2
+
     # ------------------------------------------------------------------
     # AERODYNAMIC TORQUE TABLE
     # ------------------------------------------------------------------
     # Load precomputed aerodynamic torque table from MATLAB/ADBSat  
     # Table contains 3D torques as a function of angle-of-attack (alpha) and sideslip (beta)
-    torque_table_file = "torque_table1.mat"   # 1 for +x velocity, 2 for -x velocity
+    torque_table_file = f"torque_table_{int(alpha)}.mat"  # choose the right table file for the deployment angle
     torque_path = PROJECT_ROOT / "data" / torque_table_file
-    torque_table = loadmat(torque_path, simplify_cells=True)["torque_table"]
-    torque_table = np.asarray(torque_table, dtype=float)
+    mat_data = loadmat(torque_path, simplify_cells=True)
+    torque_table = np.asarray(mat_data["torque_table"], dtype=float)
+    # Scale the torque table for the current altitude
+    torque_table = torque_table * scale
+
+    # Load inertia and CoM from their own .mat files, using the correct slice for alpha
+    data_I = loadmat(PROJECT_ROOT / "data" / "I_total_hist.mat", simplify_cells=True)
+    data_CoM = loadmat(PROJECT_ROOT / "data" / "CoM_hist.mat", simplify_cells=True)
+    I_total_hist = np.asarray(data_I["I_total_hist"], dtype=float)
+    CoM_hist = np.asarray(data_CoM["CoM_hist"], dtype=float)
+    alpha_idx = int(alpha)
+    scObject.hub.IHubPntBc_B = I_total_hist[:, :, alpha_idx].tolist()
+    scObject.hub.r_BcB_B = CoM_hist[:, alpha_idx].reshape((3,1)).tolist()
 
     aeroTorque = AeroTorqueFromTable(torque_table)
     aeroTorque.ModelTag = "AeroTorque"
