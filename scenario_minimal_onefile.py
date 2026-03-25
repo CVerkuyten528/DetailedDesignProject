@@ -29,12 +29,12 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 from scipy.io import loadmat
 from Basilisk.utilities import SimulationBaseClass, macros
-from Basilisk.utilities import simIncludeGravBody, orbitalMotion, RigidBodyKinematics as rbk
+from Basilisk.utilities import simIncludeGravBody, orbitalMotion, RigidBodyKinematics as rbk, unitTestSupport
 from Basilisk.simulation import spacecraft, magnetometer, MtbEffector, extForceTorque, simpleNav
 from Basilisk.fswAlgorithms import hillPoint, mrpFeedback, attTrackingError
 from Basilisk.architecture import messaging, sysModel, bskLogging
 import Basilisk.simulation.vizInterface as vizInterface
-
+from Basilisk.utilities import vizSupport 
 PROJECT_ROOT = Path(__file__).resolve().parent
 from Basilisk import __path__
 bskPath = __path__[0]
@@ -147,9 +147,9 @@ class SimpleBdot(sysModel.SysModel):
 
     def __init__(self):
         super().__init__()
-        self.k_gain = 500   # Gain for B-dot control [A·m²·s/T²]
+        self.k_gain = 1200   # Gain for B-dot control [A·m²·s/T²]
         self.maxDipole = 0.016
-        self.dt = 1.0
+        self.dt = 0.1
         self.B_prev = np.zeros(3)
         self.first = True
 
@@ -642,7 +642,7 @@ def run_adcs_sim():
     scSim.AddModelToTask(simTaskName, modeLog)
     scSim.AddModelToTask(simTaskName, aeroLog)
 
-    from Basilisk.utilities import vizSupport 
+
 
     viz = vizSupport.enableUnityVisualization(
         scSim,
@@ -660,6 +660,16 @@ def run_adcs_sim():
         viz.settings.showMagneticFieldVectors = True
         viz.settings.showDataPanel = True        
         viz.settings.guiPlaybackSpeed = 100.0
+        vizSupport.setActuatorGuiSetting(viz, viewRWPanel=True, viewRWHUD=True)
+
+    # ------------------------------------------------------------------
+    # This creates a .dot file named after your python script
+    # ------------------------------------------------------------------
+    
+    # dot_file_name = fileName + ".dot"
+    # unitTestSupport.writeToGraphviz(scSim, "adcs_simulation_map.dot")
+
+    # print("Graphviz .dot file successfully generated as 'adcs_simulation_map.dot'")
     # ------------------------------------------------------------------
     # RUN
     # ------------------------------------------------------------------
