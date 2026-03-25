@@ -414,7 +414,7 @@ class AeroTorqueFromTable(sysModel.SysModel):
 def run_adcs_sim(sim_index, initial_conditions):
     sim_dt = 0.1
     stop_time = 5*5400.0
-    alpha = 60.0;  # Deployment angle for aerodynamic torque table selection choose from (0, 30, 60 ,90)
+    alpha = 0.0;  # Deployment angle for aerodynamic torque table selection choose from (0, 30, 60 ,90)
 
     simProcessName = "simProcess " + str(sim_index)
     simTaskName = "simTask" + str(sim_index)
@@ -825,9 +825,10 @@ def run_monte_carlo(num_runs=10):
         
         # 2. Sample other parameters
         ics = {
-            'omega': [[random.uniform(0.3, 0.7)] for _ in range(3)],
-            'sigma': [[random.uniform(-0.1, 0.1)] for _ in range(3)],
-            'altitude': 300000.0 + random.uniform(0, 100000),
+            'com': random.uniform(-0.05, 0.05),
+            'omega': [[random.uniform(0.1, 1)] for _ in range(3)],
+            'sigma': [[random.uniform(-1, 1)] for _ in range(3)],
+            'altitude': 300000.0 + random.uniform(0, 300000),
             'inertia': [Ixx, Iyy, Izz]
         }
 
@@ -857,7 +858,7 @@ def run_monte_carlo(num_runs=10):
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.legend()
     # plt.yscale('log') # Log scale is often better for seeing the "floor" of the rate
-    
+    plt.savefig('monte_carlo_detumble.png', dpi=150)
     plt.show()
 if __name__ == "__main__":
     run_monte_carlo(num_runs=20)
