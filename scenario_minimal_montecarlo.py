@@ -129,6 +129,8 @@ class SimpleMagneticField(sysModel.SysModel):
             m_unit = np.array([0.0, 0.0, -1.0])
             m_dot_r = np.dot(m_unit, r_hat)
             B_N = (self.mu_earth / r_mag**3) * (3.0 * m_dot_r * r_hat - m_unit)
+            # SIMPLE NOISE
+            B_N += np.random.normal(loc=0.0, scale=15e-9, size=3)
         else:
             B_N = np.zeros(3)
 
@@ -539,7 +541,9 @@ def run_adcs_sim(sim_index, initial_conditions):
     TAM = magnetometer.Magnetometer()
     TAM.ModelTag = "TAM"
     TAM.scaleFactor = 1.0
-    TAM.senNoiseStd = [15e-9, 15e-9, 15e-9]
+    # TAM.senNoiseStd = [15e-9, 15e-9, 15e-9]
+    # SIMPLE NOISE MODEL
+    TAM.senNoiseStd = [0,0,0]
     TAM.maxOutput = 800e-6
     TAM.minOutput = -800e-6
     TAM.dcm_SB = [
