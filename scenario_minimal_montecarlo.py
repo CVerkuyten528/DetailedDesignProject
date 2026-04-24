@@ -413,7 +413,7 @@ class AeroTorqueFromTable(sysModel.SysModel):
 
 def run_adcs_sim(sim_index, initial_conditions):
     sim_dt = 0.1
-    stop_time = 5*5400.0
+    stop_time = 16*5400.0
     alpha = 0.0;  # Deployment angle for aerodynamic torque table selection choose from (0, 30, 60 ,90)
 
     simProcessName = "simProcess " + str(sim_index)
@@ -649,24 +649,24 @@ def run_adcs_sim(sim_index, initial_conditions):
     scSim.AddModelToTask(simTaskName, aeroLog)
 
 
-
-    viz = vizSupport.enableUnityVisualization(
-        scSim,
-        simTaskName,
-        scObject,
-        saveFile=fileName,
-        liveStream=False
-    )
-    if  vizSupport.vizFound:
-        print('vizfound')
-        # Force these on by default in the .bin file
-        viz.settings.showAngularVelocityVectors = True
-        viz.settings.showMtbForceVectors = True  
-        viz.settings.showMtbDipoleVectors = True 
-        viz.settings.showMagneticFieldVectors = True
-        viz.settings.showDataPanel = True        
-        viz.settings.guiPlaybackSpeed = 100.0
-        vizSupport.setActuatorGuiSetting(viz, viewRWPanel=True, viewRWHUD=True)
+    # Uncomment the following lines for vizualization
+    # viz = vizSupport.enableUnityVisualization(
+    #     scSim,
+    #     simTaskName,
+    #     scObject,
+    #     saveFile=fileName,
+    #     liveStream=False
+    # )
+    # if  vizSupport.vizFound:
+    #     print('vizfound')
+    #     # Force these on by default in the .bin file
+    #     viz.settings.showAngularVelocityVectors = True
+    #     viz.settings.showMtbForceVectors = True  
+    #     viz.settings.showMtbDipoleVectors = True 
+    #     viz.settings.showMagneticFieldVectors = True
+    #     viz.settings.showDataPanel = True        
+    #     viz.settings.guiPlaybackSpeed = 100.0
+    #     vizSupport.setActuatorGuiSetting(viz, viewRWPanel=True, viewRWHUD=True)
 
     # ------------------------------------------------------------------
     # This creates a .dot file named after your python script
@@ -717,6 +717,33 @@ def run_adcs_sim(sim_index, initial_conditions):
     # ------------------------------------------------------------------
     # PLOTS
     # ------------------------------------------------------------------
+    # Plot 2: Nadir pointing error
+    # Calculate latitude for pole detection
+    r_mag_plot = np.linalg.norm(r_BN_N, axis=1)
+    lat_rad = np.arcsin(r_BN_N[:, 2] / r_mag_plot)
+    lat_deg = np.degrees(lat_rad)
+    pole_mask = np.abs(lat_deg) > 85  # Within 5 degrees of poles
+    
+    # Plot in segments with different colors
+    start = 0
+    for i in range(1, len(pole_mask)):
+        if pole_mask[i] != pole_mask[i-1]:
+            end = i
+            color = 'red' if pole_mask[i-1] else 'tab:orange'
+            label = 'Nadir Error (Pole)' if pole_mask[i-1] else 'Nadir Error'
+            plt.plot(time_min[start:end], body_z_to_nadir_deg[start:end], color=color, label=label if start == 0 else "")
+            start = i
+    # Last segment
+    color = 'red' if pole_mask[-1] else 'tab:orange'
+    label = 'Nadir Error (Pole)' if pole_mask[-1] else 'Nadir Error'
+    plt.plot(time_min[start:], body_z_to_nadir_deg[start:], color=color, label=label if start == 0 else "")
+    
+    plt.ylabel('Angle [deg]')
+    plt.title('Body +Z alignment offset from Nadir')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('nadir_pointing_error.png', dpi=150)
+    plt.show()
     # fig, axes = plt.subplots(7, 1, figsize=(12, 26), sharex=True)
 
     # # Plot 0: Body rate
@@ -805,10 +832,10 @@ def run_adcs_sim(sim_index, initial_conditions):
     
 
 
-def run_monte_carlo(num_runs=10):
+def run_monte_carlo(num_runs=1):
     """Executes multiple simulations with randomized parameters."""
     # 1. Define a common time grid for averaging (0 to 5400s)
-    common_time = np.linspace(0, 5400*5, 500) 
+    common_time = np.linspace(0, 5400*16, 5000) 
     all_rates = []
 
     # Define Inertia Bounds (Best, Nominal, Worst)
@@ -823,13 +850,22 @@ def run_monte_carlo(num_runs=10):
         Iyy = np.random.triangular(*iyz_bounds)
         Izz = np.random.triangular(*iyz_bounds)
         
-        # 2. Sample other parameters
+        # # Sample other parameters
+        # ics = {
+        #     'com': random.uniform(-0.05, 0.05),
+        #     'omega': [[random.uniform(0.1, 1)] for _ in range(3)],
+        #     'sigma': [[random.uniform(-1, 1)] for _ in range(3)],
+        #     'altitude': 300000.0 + random.uniform(0, 300000),
+        #     'inertia': [Ixx, Iyy, Izz]
+        # }
+
         ics = {
-            'com': random.uniform(-0.05, 0.05),
-            'omega': [[random.uniform(0.1, 1)] for _ in range(3)],
-            'sigma': [[random.uniform(-1, 1)] for _ in range(3)],
-            'altitude': 300000.0 + random.uniform(0, 300000),
-            'inertia': [Ixx, Iyy, Izz]
+            'com': 0.0,
+            'omega': [[0.5], [0.5], [0.5]],
+            'sigma': [[0.0], [0.0], [0.0]],
+            'altitude': 300000.0,
+            'inertia': [0.0013, 0.0056, 0.0056]
+
         }
 
         # Run the simulation (assume run_adcs_sim returns the scLog)
@@ -861,4 +897,4 @@ def run_monte_carlo(num_runs=10):
     plt.savefig('monte_carlo_detumble.png', dpi=150)
     plt.show()
 if __name__ == "__main__":
-    run_monte_carlo(num_runs=20)
+    run_monte_carlo(num_runs=1)
