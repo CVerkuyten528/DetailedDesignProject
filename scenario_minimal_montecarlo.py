@@ -129,7 +129,10 @@ class SimpleMagneticField(sysModel.SysModel):
             m_unit = np.array([0.0, 0.0, -1.0])
             m_dot_r = np.dot(m_unit, r_hat)
             B_N = (self.mu_earth / r_mag**3) * (3.0 * m_dot_r * r_hat - m_unit)
+<<<<<<< Updated upstream
             # SIMPLE NOISE
+=======
+>>>>>>> Stashed changes
             B_N += np.random.normal(loc=0.0, scale=15e-9, size=3)
         else:
             B_N = np.zeros(3)
@@ -415,7 +418,7 @@ class AeroTorqueFromTable(sysModel.SysModel):
 
 def run_adcs_sim(sim_index, initial_conditions):
     sim_dt = 0.1
-    stop_time = 16*5400.0
+    stop_time = 12*5400.0
     alpha = 0.0;  # Deployment angle for aerodynamic torque table selection choose from (0, 30, 60 ,90)
 
     simProcessName = "simProcess " + str(sim_index)
@@ -542,8 +545,12 @@ def run_adcs_sim(sim_index, initial_conditions):
     TAM.ModelTag = "TAM"
     TAM.scaleFactor = 1.0
     # TAM.senNoiseStd = [15e-9, 15e-9, 15e-9]
+<<<<<<< Updated upstream
     # SIMPLE NOISE MODEL
     TAM.senNoiseStd = [0,0,0]
+=======
+    TAM.senNoiseStd = [0.0, 0.0, 0.0]  # No noise for testing
+>>>>>>> Stashed changes
     TAM.maxOutput = 800e-6
     TAM.minOutput = -800e-6
     TAM.dcm_SB = [
@@ -726,19 +733,19 @@ def run_adcs_sim(sim_index, initial_conditions):
     r_mag_plot = np.linalg.norm(r_BN_N, axis=1)
     lat_rad = np.arcsin(r_BN_N[:, 2] / r_mag_plot)
     lat_deg = np.degrees(lat_rad)
-    pole_mask = np.abs(lat_deg) > 85  # Within 5 degrees of poles
+    pole_mask = np.abs(lat_deg) > 75  # Within 5 degrees of poles
     
     # Plot in segments with different colors
     start = 0
     for i in range(1, len(pole_mask)):
         if pole_mask[i] != pole_mask[i-1]:
             end = i
-            color = 'red' if pole_mask[i-1] else 'tab:orange'
+            color = 'red' if pole_mask[i-1] else 'tab:blue'
             label = 'Nadir Error (Pole)' if pole_mask[i-1] else 'Nadir Error'
             plt.plot(time_min[start:end], body_z_to_nadir_deg[start:end], color=color, label=label if start == 0 else "")
             start = i
     # Last segment
-    color = 'red' if pole_mask[-1] else 'tab:orange'
+    color = 'red' if pole_mask[-1] else 'tab:blue'
     label = 'Nadir Error (Pole)' if pole_mask[-1] else 'Nadir Error'
     plt.plot(time_min[start:], body_z_to_nadir_deg[start:], color=color, label=label if start == 0 else "")
     
@@ -748,6 +755,46 @@ def run_adcs_sim(sim_index, initial_conditions):
     plt.grid(True)
     plt.savefig('nadir_pointing_error.png', dpi=150)
     plt.show()
+
+    
+    fig, axes = plt.subplots(4, 1, figsize=(12, 26), sharex=True)
+
+    axes[0].plot(time_min[start:], body_z_to_nadir_deg[start:], color=color, label=label if start == 0 else "")
+    
+    axes[0].set_ylabel('Angle [deg]')
+    axes[0].set_title('Body +Z alignment offset from Nadir')
+    axes[0].legend()
+    axes[0].grid(True)
+
+    # Plot 2: Magnetometer (TAM) measurement magnitude
+    axes[1].plot(time_min, np.linalg.norm(B_tam_S_nT, axis=1), color='tab:green')
+    axes[1].set_ylabel('|B| [nT]')
+    axes[1].set_title('TAM magnitude')
+    axes[1].grid(True)
+
+    # plot 3: Commanded magnetorquer (MTB) dipole moments
+    axes[2].plot(time_min, dipole_cmd[:, 0], label='mx')
+    axes[2].plot(time_min, dipole_cmd[:, 1], label='my')
+    axes[2].plot(time_min, dipole_cmd[:, 2], label='mz')
+    axes[2].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[2].set_ylabel('Dipole [A·m²]')
+    axes[2].set_title('Commanded MTB dipoles')
+    axes[2].legend()
+    axes[2].grid(True)
+
+    # plot 4: Applied magnetorquer (MTB) torques on spacecraft body
+    axes[3].plot(time_min, torque_mtb_uNm[:, 0], label='τx MTB')
+    axes[3].plot(time_min, torque_mtb_uNm[:, 1], label='τy MTB')
+    axes[3].plot(time_min, torque_mtb_uNm[:, 2], label='τz MTB')
+    axes[3].axhline(0.0, color='k', linestyle='--', linewidth=0.6)
+    axes[3].set_ylabel('MTB torque [µN·m]')
+    axes[3].set_title('Applied MTB torques')
+    axes[3].legend()
+    axes[3].grid(True)
+
+    plt.savefig('adcs_results.png', dpi=150)
+    plt.show()
+
     # fig, axes = plt.subplots(7, 1, figsize=(12, 26), sharex=True)
 
     # # Plot 0: Body rate
@@ -839,7 +886,7 @@ def run_adcs_sim(sim_index, initial_conditions):
 def run_monte_carlo(num_runs=1):
     """Executes multiple simulations with randomized parameters."""
     # 1. Define a common time grid for averaging (0 to 5400s)
-    common_time = np.linspace(0, 5400*16, 5000) 
+    common_time = np.linspace(0, 5400*12, 5000) 
     all_rates = []
 
     # Define Inertia Bounds (Best, Nominal, Worst)
